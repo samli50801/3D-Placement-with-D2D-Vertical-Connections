@@ -1,0 +1,5 @@
+Usage:
+(1) $make
+(2) $./bin/place <input file> <output file>
+(ex: ./bin/place testcase/case2 o2.txt)
+(3) results including output file and .plt will be generated in bin/ folder

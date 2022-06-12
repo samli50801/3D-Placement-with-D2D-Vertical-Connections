@@ -1,0 +1,337 @@
+#include "data.h"
+#include <map>
+#include <set>
+#include <algorithm>
+
+void Data::DP(int iteration)
+{
+	// separate instances to 2 die
+	vector < vector <pair <int,int>>> top_ins;
+	vector < vector <pair <int, int>>> bottom_ins;
+
+	int top_MC_avg_width = 0;
+	for (int i = 1; i <= _technologies[_dies[0].getTech()].getLibCellCount(); i++)
+		top_MC_avg_width += _technologies[_dies[0].getTech()].getLibCell(i).getSizeX();
+	top_MC_avg_width /= _technologies[_dies[0].getTech()].getLibCellCount();
+	int half_top_MC_avg_width = top_MC_avg_width / 2;
+
+	int bottom_MC_avg_width = 0;
+	for (int i = 1; i <= _technologies[_dies[1].getTech()].getLibCellCount(); i++)
+		bottom_MC_avg_width += _technologies[_dies[1].getTech()].getLibCell(i).getSizeX();
+	bottom_MC_avg_width /= _technologies[_dies[1].getTech()].getLibCellCount();
+	int half_bottom_MC_avg_width = bottom_MC_avg_width / 2;
+
+	int window = 3;
+
+	for (int t = 0; t < iteration; t++)
+	{
+		cout<<"detailed placemt("<<t<<" iteration)"<<'\n';
+
+		// seperate TOP and BOTTOM instance
+		top_ins.clear();
+		top_ins.resize(_dies[0].getRow().getRepeatCount());
+		bottom_ins.clear();
+		bottom_ins.resize(_dies[1].getRow().getRepeatCount());
+
+		for (int i = 1; i < _instances.size(); i++)
+		{
+			if (_instances[i].getTech() == 0)
+				top_ins[_instances[i].getPosY() / _dies[0].getRow().getRowHeight()]
+				.push_back(make_pair(_instances[i].getPosX(), i));
+			else
+				bottom_ins[_instances[i].getPosY() / _dies[1].getRow().getRowHeight()]
+				.push_back(make_pair(_instances[i].getPosX(), i));
+		}
+
+		// construct TOP segments
+		vector < vector <segment>> top_seg(top_ins.size());
+		for (int i = 0; i < top_ins.size(); i++)
+		{
+			sort(top_ins[i].begin(), top_ins[i].end());
+			for (int j = 0; j < top_ins[i].size(); j += window)
+			{
+				vector <int> index;
+				for (int k = 0; k < window; k++)
+				{
+					if (j + k < top_ins[i].size())
+						index.push_back(top_ins[i][j + k].second);
+					else
+						break;
+				}
+
+				int x1, x2;
+				if (j == 0)
+					x1 = _dies[0].getLowerLeftX();
+				else
+					x1 = _instances[index[0]].getPosX();
+
+				if (j + window >= top_ins[i].size())
+					x2 = _dies[0].getUpperRightX();
+				else
+					x2 = _instances[index.back()].getPosX() + _instances[index.back()].getLibCell().getSizeX();
+
+				segment temp(x2 - x1, x1, x2, _instances[index[0]].getPosY());
+				for (int k = 0; k < index.size(); k++)
+					temp.add_ins(index[k]);
+
+				top_seg[i].push_back(temp);
+			}
+		}
+
+		// adjust TOP segment
+		for (int i = 0; i < top_seg.size(); i++)
+		{
+			for (int j = 0; j < top_seg[i].size(); j++)
+			{
+				if (_instances[top_seg[i][j].get_ins()[0]].getPosX() - top_seg[i][j].get_x1() > half_top_MC_avg_width)
+					top_seg[i][j].set_x1(_instances[top_seg[i][j].get_ins()[0]].getPosX() - half_top_MC_avg_width);
+
+				if (top_seg[i][j].get_x2() - _instances[top_seg[i][j].get_ins().back()].getPosX()
+					- _instances[top_seg[i][j].get_ins().back()].getLibCell().getSizeX() > half_top_MC_avg_width)
+					top_seg[i][j].set_x2(_instances[top_seg[i][j].get_ins().back()].getPosX()
+						+ _instances[top_seg[i][j].get_ins().back()].getLibCell().getSizeX() + half_top_MC_avg_width);
+
+				for (int k = 0; k < top_seg[i][j].get_ins().size() - 1; k++)
+				{
+					int c1 = top_seg[i][j].get_ins()[k];
+					int c2 = top_seg[i][j].get_ins()[k + 1];
+
+					if (_instances[c2].getPosX() - _instances[c1].getPosX() - _instances[c1].getLibCell().getSizeX()
+				> top_MC_avg_width)
+					{
+						int x1 = _instances[c2].getPosX() - half_top_MC_avg_width;
+						int x2 = top_seg[i][j].get_x2();
+						segment temp(x2 - x1, x1, x2, top_seg[i][j].get_y());
+						for (int g = k + 1; g < top_seg[i][j].get_ins().size(); g++)
+							temp.add_ins(top_seg[i][j].get_ins()[g]);
+
+						top_seg[i].push_back(temp);
+
+						top_seg[i][j].set_x2(_instances[c1].getPosX() + _instances[c1].getLibCell().getSizeX()
+							+ half_top_MC_avg_width);
+
+						int s = top_seg[i][j].get_ins().size();
+						for (int r = 0; r < s - k - 1; r++)
+							top_seg[i][j].pop_ins();
+
+						break;
+					}
+				}
+			}
+		}
+
+		// add net into TOP segment
+		for (int i = 0; i < top_seg.size(); i++)
+			for (int j = 0; j < top_seg[i].size(); j++)
+				for (int k = 0; k < top_seg[i][j].get_ins().size(); k++)
+					for (auto it = _instances[top_seg[i][j].get_ins()[k]].get_net().begin();
+						it != _instances[top_seg[i][j].get_ins()[k]].get_net().end(); it++)
+						top_seg[i][j].add_net(*it);
+
+		// TOP DFS-branch-and-bound
+		for (int i = 0; i < top_seg.size(); i++)
+		{
+			for (int j = 0; j < top_seg[i].size(); j++)
+			{
+				long long int WL = 0;
+				for (auto it = top_seg[i][j].get_net().begin(); it != top_seg[i][j].get_net().end(); it++)
+					WL += calcWL(*it);
+
+				vector <int> x_coor(top_seg[i][j].get_ins().size());
+				for (int k = 0; k < x_coor.size(); k++)
+					x_coor[k] = _instances[top_seg[i][j].get_ins()[k]].getPosX();
+
+				vector < pair<int, int>>  space;
+				space.push_back(make_pair(top_seg[i][j].get_x1(), top_seg[i][j].get_x2()));
+
+				BB(top_seg[i][j], top_MC_avg_width, space, WL, 0, x_coor, 0);
+
+				for (int k = 0; k < top_seg[i][j].get_ins().size(); k++)
+					_instances[top_seg[i][j].get_ins()[k]].setPos(x_coor[k], top_seg[i][j].get_y());
+			}
+		}
+
+		// construct BOTTOM segments
+		vector < vector <segment>> bottom_seg(bottom_ins.size());
+		for (int i = 0; i < bottom_ins.size(); i++)
+		{
+			sort(bottom_ins[i].begin(), bottom_ins[i].end());
+			for (int j = 0; j < bottom_ins[i].size(); j += window)
+			{
+				vector <int> index;
+				for (int k = 0; k < window; k++)
+				{
+					if (j + k < bottom_ins[i].size())
+						index.push_back(bottom_ins[i][j + k].second);
+					else
+						break;
+				}
+
+				int x1, x2;
+				if (j == 0)
+					x1 = _dies[1].getLowerLeftX();
+				else
+					x1 = _instances[index[0]].getPosX();
+
+				if (j + window >= bottom_ins[i].size())
+					x2 = _dies[1].getUpperRightX();
+				else
+					x2 = _instances[index.back()].getPosX() + _instances[index.back()].getLibCell().getSizeX();
+
+				segment temp(x2 - x1, x1, x2, _instances[index[0]].getPosY());
+				for (int k = 0; k < index.size(); k++)
+					temp.add_ins(index[k]);
+
+				bottom_seg[i].push_back(temp);
+			}
+		}
+
+		// adjust BOTTOM segment
+		for (int i = 0; i < bottom_seg.size(); i++)
+		{
+			for (int j = 0; j < bottom_seg[i].size(); j++)
+			{
+				if (_instances[bottom_seg[i][j].get_ins()[0]].getPosX() - bottom_seg[i][j].get_x1() > half_bottom_MC_avg_width)
+					bottom_seg[i][j].set_x1(_instances[bottom_seg[i][j].get_ins()[0]].getPosX() - half_bottom_MC_avg_width);
+
+				if (bottom_seg[i][j].get_x2() - _instances[bottom_seg[i][j].get_ins().back()].getPosX()
+					- _instances[bottom_seg[i][j].get_ins().back()].getLibCell().getSizeX() > half_bottom_MC_avg_width)
+					bottom_seg[i][j].set_x2(_instances[bottom_seg[i][j].get_ins().back()].getPosX()
+						+ _instances[bottom_seg[i][j].get_ins().back()].getLibCell().getSizeX() + half_bottom_MC_avg_width);
+
+				for (int k = 0; k < bottom_seg[i][j].get_ins().size() - 1; k++)
+				{
+					int c1 = bottom_seg[i][j].get_ins()[k];
+					int c2 = bottom_seg[i][j].get_ins()[k + 1];
+
+					if (_instances[c2].getPosX() - _instances[c1].getPosX() - _instances[c1].getLibCell().getSizeX()
+				> bottom_MC_avg_width)
+					{
+						int x1 = _instances[c2].getPosX() - half_bottom_MC_avg_width;
+						int x2 = bottom_seg[i][j].get_x2();
+						segment temp(x2 - x1, x1, x2, bottom_seg[i][j].get_y());
+						for (int g = k + 1; g < bottom_seg[i][j].get_ins().size(); g++)
+							temp.add_ins(bottom_seg[i][j].get_ins()[g]);
+
+						bottom_seg[i].push_back(temp);
+
+						bottom_seg[i][j].set_x2(_instances[c1].getPosX() + _instances[c1].getLibCell().getSizeX()
+							+ half_bottom_MC_avg_width);
+
+						int s = bottom_seg[i][j].get_ins().size();
+						for (int r = 0; r < s - k - 1; r++)
+							bottom_seg[i][j].pop_ins();
+
+						break;
+					}
+				}
+			}
+		}
+
+		// add net into BOTTOM segment
+		for (int i = 0; i < bottom_seg.size(); i++)
+			for (int j = 0; j < bottom_seg[i].size(); j++)
+				for (int k = 0; k < bottom_seg[i][j].get_ins().size(); k++)
+					for (auto it = _instances[bottom_seg[i][j].get_ins()[k]].get_net().begin();
+						it != _instances[bottom_seg[i][j].get_ins()[k]].get_net().end(); it++)
+						bottom_seg[i][j].add_net(*it);
+
+		// BOTTOM DFS-branch-and-bound
+		for (int i = 0; i < bottom_seg.size(); i++)
+		{
+			for (int j = 0; j < bottom_seg[i].size(); j++)
+			{
+				long long int WL = 0;
+				for (auto it = bottom_seg[i][j].get_net().begin(); it != bottom_seg[i][j].get_net().end(); it++)
+					WL += calcWL(*it);
+
+				vector <int> x_coor(bottom_seg[i][j].get_ins().size());
+				for (int k = 0; k < x_coor.size(); k++)
+					x_coor[k] = _instances[bottom_seg[i][j].get_ins()[k]].getPosX();
+
+				vector < pair<int, int>>  space;
+				space.push_back(make_pair(bottom_seg[i][j].get_x1(), bottom_seg[i][j].get_x2()));
+
+				BB(bottom_seg[i][j], bottom_MC_avg_width, space, WL, 0, x_coor, 0);
+
+				for (int k = 0; k < bottom_seg[i][j].get_ins().size(); k++)
+					_instances[bottom_seg[i][j].get_ins()[k]].setPos(x_coor[k], bottom_seg[i][j].get_y());
+			}
+		}
+	}
+}
+
+void Data::BB(segment& seg, int step_size, vector < pair<int, int>>& free_space
+	, long long int& best_WL, long long int current_WL, vector <int>& best_pos, int current_ins)
+{
+	if (current_ins == seg.get_ins().size())
+	{
+		if (current_WL < best_WL)
+		{
+			best_WL = current_WL;
+			for (int i = 0; i < best_pos.size(); i++)
+				best_pos[i] = _instances[seg.get_ins()[i]].getPosX();
+		}
+
+		return;
+	}
+
+	int ins = seg.get_ins()[current_ins];
+	vector <int> pass(seg.get_ins().size() - current_ins - 1);
+	for (int i = 0; i < pass.size(); i++)
+		pass[i] = seg.get_ins()[i + current_ins];
+	for (int i = 0; i < free_space.size(); i++)
+	{
+		if (free_space[i].second - free_space[i].first < _instances[ins].getLibCell().getSizeX())
+			continue;
+
+		bool next = 0;
+		for (int x = free_space[i].first; ; x += step_size)
+		{
+			if (x + _instances[ins].getLibCell().getSizeX() >= free_space[i].second)
+			{
+				x = free_space[i].second - _instances[ins].getLibCell().getSizeX();
+				next = 1;
+			}
+
+			_instances[ins].setPos(x, _instances[ins].getPosY());
+
+			// refresh WL
+			long long int new_WL = 0;
+			for (auto it = seg.get_net().begin(); it != seg.get_net().end(); it++)
+				new_WL += calc_partWL(*it, pass);
+
+			if (new_WL > best_WL)
+			{
+				if (next == 1)
+					break;
+
+				continue;
+			}
+
+			vector < pair<int, int>> space(free_space.size());
+			for (int j = 0; j < space.size(); j++)
+				space[j] = free_space[j];
+
+			if (x == free_space[i].first) // left
+				space[i].first += _instances[ins].getLibCell().getSizeX();
+			else if (next == 1) // right
+				space[i].second -= _instances[ins].getLibCell().getSizeX();
+			else // mid
+			{
+				pair<int, int> temp;
+				temp.second = space[i].second;
+
+				space[i].second = x;
+				temp.first = space[i].second + _instances[ins].getLibCell().getSizeX();
+
+				space.push_back(temp);
+			}
+
+			BB(seg, step_size, space, best_WL, new_WL, best_pos, current_ins + 1);
+
+			if (next == 1)
+				break;
+		}
+	}
+}
